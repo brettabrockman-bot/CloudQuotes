@@ -1,31 +1,26 @@
 
-# Jenne Cloud Quotes Dashboard — Team V1 (Locked Mapping)
+# Jenne Cloud Quotes Dashboard — Team V1 (Row-3 Headers & Drilldowns)
 
-This build is pinned to your exact Epicor export headers (Row 2 is the header row). It supports `.xlsx`, `.xls`, and `.csv`.
+Deployed on Streamlit Community Cloud. Supports `.xls/.xlsx/.csv`. Region tabs + clickable drilldowns.
 
-## Deploy on Streamlit Community Cloud (Private)
-1. Push these files to a GitHub repo.
-2. In Streamlit Cloud, create an app from that repo.
-3. (Optional) Add Secrets:
-   - `DASH_PASSWORD`: simple password gate
-   - `DB_PATH`: default `data/quotes.db`
+## Key Behaviors
+- **Header row is configurable** in the sidebar (default **3** for your Epicor export).
+- **Strict mapping** (Epicor exact headers) or **Flexible mapping** (aliases & normalization).
+- Stores history in SQLite (`data/quotes.db`).
+- KPIs + weekly trend + top accounts/vendors + by-state + drilldown table.
 
-## Upload Instructions
-- Upload the weekly export **exactly as Epicor produces it**. The app reads **Row 2** as headers.
-- The following fields are mapped:
-  - account ← Partner Name
-  - quote_id ← Quote Number
-  - vendor ← Vendor Name
-  - amount ← Grand Total after Discount
-  - owner ← Inside Rep.
-  - stage ← Milestone
-  - quote_date ← Entered Date
-  - state ← State
-  - product_family ← Part Description
-- Extras kept for future use: Expected Close, Cloud Inside Rep, Territory, MonthlyRecurringCharge, Entered By, Last Changed Date, Expire Date, Summary, Note, Part Number, Quantity, UnitCost
+## How to Run (Streamlit Cloud)
+1. Ensure **Python 3.11** is selected in **Advanced settings** at deploy time.
+2. Main file path = `app.py`.
+3. (Optional) Secrets:
+   - `DASH_PASSWORD` for a simple gate.
+   - `DB_PATH` (default `data/quotes.db`).
 
-## Features
-- Regions + clickable drilldowns (week, account, vendor, state)
-- KPIs, weekly trend, owner leaderboards
-- CSV export of filtered/drilled tables
-- SQLite persistence (swap to Turso/Supabase later if desired)
+## Weekly Ingest
+1. Export the Epicor “Cloud Quotes” report (unaltered).
+2. In the app, set **Header row (1-based)** to **3** (or whatever line your headers are on).
+3. Upload file, set Week label (e.g., `2025-W45`), click **Ingest**.
+
+## Troubleshooting
+- **Missing required columns:** Check the **Header row** setting. If headers vary, uncheck **Strict Epicor mapping** to use alias-matching.
+- **No data after restart:** SQLite should persist, but if you need stronger durability later, swap to Turso/Supabase (UI unchanged).
