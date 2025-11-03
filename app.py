@@ -5,17 +5,7 @@ from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-
-# Clickable charts (guarded so app still runs if the lib import fails)
-try:
-    from streamlit_plotly_events import plotly_events
-except Exception as e:
-    import streamlit as st  # noqa
-    st.warning(f"Clickable charts disabled: {e}")
-    def plotly_events(fig, **kwargs):
-        st.plotly_chart(fig, use_container_width=True)
-        return []
-
+from streamlit_plotly_events import plotly_events
 
 # ──────────────────────────────────────────────────────────────────────────────
 # App config
@@ -23,43 +13,13 @@ except Exception as e:
 st.set_page_config(page_title="Jenne Cloud Quotes Dashboard — Team V1", layout="wide")
 st.title("☁️ Jenne Cloud Quotes Dashboard — Team V1")
 
-# Show any fatal startup error instead of silently failing health checks
-try:
-    pass  # placeholder; real work happens below
-except Exception as e:
-    st.error("🚨 Startup error — see details below")
-    st.exception(e)
-    st.stop()
-
-with st.expander("⚙️ Debug / Environment (open if something breaks)"):
-    # Package versions
-    import sys
-    st.write({
-        "python": sys.version,
-        "streamlit": st.__version__,
-        "pandas": pd.__version__,
-    })
-    # DB quick check
-    try:
-        with sqlite3.connect(DB_PATH) as _c:
-            cur = _c.cursor()
-            cur.execute("PRAGMA table_info(quotes);")
-            schema = cur.fetchall()
-            cur.execute("SELECT COUNT(*) FROM quotes;")
-            rowcount = cur.fetchone()[0]
-        st.write({"db_path": DB_PATH, "quotes_rows": rowcount, "quotes_schema": schema})
-    except Exception as e:
-        st.error(f"DB check failed: {e}")
-
 DASH_PASSWORD = os.getenv("DASH_PASSWORD") or st.secrets.get("DASH_PASSWORD", None)
 if DASH_PASSWORD:
     pw = st.sidebar.text_input("Enter dashboard password", type="password")
     if pw != DASH_PASSWORD:
         st.stop()
 
-import pathlib
-APP_ROOT = pathlib.Path(__file__).parent.resolve()
-DB_PATH = str(APP_ROOT.joinpath("data", "quotes.db"))
+DB_PATH = os.getenv("DB_PATH", "data/quotes.db")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Region map
@@ -140,8 +100,7 @@ def parse_stage_bucket(x: str) -> str:
 # Database setup
 # ──────────────────────────────────────────────────────────────────────────────
 def init_db():
-    data_dir = os.path.dirname(DB_PATH)
-    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS quotes (
@@ -161,17 +120,16 @@ def init_db():
                 line_items INTEGER
             );
         """)
-        # Make migrations idempotent
-        for alter in [
-            "ALTER TABLE quotes ADD COLUMN mrc_total REAL;",
-            "ALTER TABLE quotes ADD COLUMN line_items INTEGER;",
-        ]:
-            try:
-                conn.execute(alter)
-            except Exception:
-                pass
+        # migrations (no-op if already applied)
+        try:
+            conn.execute("ALTER TABLE quotes ADD COLUMN mrc_total REAL;")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE quotes ADD COLUMN line_items INTEGER;")
+        except Exception:
+            pass
         conn.commit()
-
 
 def add_region(df: pd.DataFrame) -> pd.DataFrame:
     st_col = df.get("state")
