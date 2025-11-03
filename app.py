@@ -5,22 +5,31 @@ from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-# Clickable charts (guarded so the app still works if the lib isn't present)
+
+# Clickable charts (guarded so app still runs if the lib import fails)
 try:
     from streamlit_plotly_events import plotly_events
 except Exception as e:
-    import streamlit as st
-    st.warning(f"Clickable charts disabled ({e}). You can still use the dashboard.")
+    import streamlit as st  # noqa
+    st.warning(f"Clickable charts disabled: {e}")
     def plotly_events(fig, **kwargs):
-        # Fallback: just render the chart; return no click events
         st.plotly_chart(fig, use_container_width=True)
         return []
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # App config
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Jenne Cloud Quotes Dashboard — Team V1", layout="wide")
 st.title("☁️ Jenne Cloud Quotes Dashboard — Team V1")
+
+# Show any fatal startup error instead of silently failing health checks
+try:
+    pass  # placeholder; real work happens below
+except Exception as e:
+    st.error("🚨 Startup error — see details below")
+    st.exception(e)
+    st.stop()
 
 with st.expander("⚙️ Debug / Environment (open if something breaks)"):
     # Package versions
@@ -48,7 +57,9 @@ if DASH_PASSWORD:
     if pw != DASH_PASSWORD:
         st.stop()
 
-DB_PATH = os.getenv("DB_PATH", "data/quotes.db")
+import pathlib
+APP_ROOT = pathlib.Path(__file__).parent.resolve()
+DB_PATH = str(APP_ROOT.joinpath("data", "quotes.db"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Region map
@@ -129,7 +140,8 @@ def parse_stage_bucket(x: str) -> str:
 # Database setup
 # ──────────────────────────────────────────────────────────────────────────────
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    data_dir = os.path.dirname(DB_PATH)
+    os.makedirs(data_dir, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS quotes (
@@ -149,16 +161,17 @@ def init_db():
                 line_items INTEGER
             );
         """)
-        # migrations (no-op if already applied)
-        try:
-            conn.execute("ALTER TABLE quotes ADD COLUMN mrc_total REAL;")
-        except Exception:
-            pass
-        try:
-            conn.execute("ALTER TABLE quotes ADD COLUMN line_items INTEGER;")
-        except Exception:
-            pass
+        # Make migrations idempotent
+        for alter in [
+            "ALTER TABLE quotes ADD COLUMN mrc_total REAL;",
+            "ALTER TABLE quotes ADD COLUMN line_items INTEGER;",
+        ]:
+            try:
+                conn.execute(alter)
+            except Exception:
+                pass
         conn.commit()
+
 
 def add_region(df: pd.DataFrame) -> pd.DataFrame:
     st_col = df.get("state")
