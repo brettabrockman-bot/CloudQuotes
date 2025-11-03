@@ -128,6 +128,46 @@ def add_region(df: pd.DataFrame) -> pd.DataFrame:
     df["region"] = tmp.map(REGION_BY_STATE).fillna("Unassigned")
     return df
 
+def dedupe_to_quote_level(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse line-item rows to one row per quote_id.
+    - Sort by 'last_changed' (if present) then 'quote_date' to keep latest.
+    - Amount: take MAX per quote (safer than SUM when the report repeats the grand total per line).
+    """
+    df = df.copy()
+
+    # Normalize date-like fields for sorting if present
+    sort_cols = []
+    if 'last_changed' in df.columns:
+        df['last_changed'] = pd.to_datetime(df['last_changed'], errors='coerce')
+        sort_cols.append('last_changed')
+    if 'quote_date' in df.columns:
+        df['quote_date'] = pd.to_datetime(df['quote_date'], errors='coerce')
+        sort_cols.append('quote_date')
+
+    if sort_cols:
+        df = df.sort_values(sort_cols)
+
+    # Aggregation rules per quote
+    agg_map = {
+        'account': 'last',
+        'amount': 'max',
+        'stage': 'last',
+        'stage_bucket': 'last',
+        'owner': 'last',
+        'vendor': 'last',
+        'product_family': 'last',
+        'state': 'last',
+        'quote_date': 'last',
+        'week_label': 'last',
+        'source_file': 'last',
+        'region': 'last',
+    }
+    agg_map = {k: v for k, v in agg_map.items() if k in df.columns}
+
+    deduped = df.groupby('quote_id', as_index=False).agg(agg_map)
+    return deduped
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Upload & ingest
 # ──────────────────────────────────────────────────────────────────────────────
@@ -170,14 +210,26 @@ def upsert_quotes_from_df(raw_df: pd.DataFrame, source_file: str, week_label: st
 
     df = add_region(df)
 
-    with sqlite3.connect(DB_PATH) as conn:
-        cols = ['quote_id','account','amount','stage','stage_bucket','owner','vendor','product_family','state','quote_date','week_label','source_file']
-        df['source_file'] = source_file
-        df['week_label'] = week_label
-        for c in cols:
-            if c not in df.columns:
-                df[c] = None
-        df[cols].to_sql('quotes', conn, if_exists='append', index=False)
+   # mark metadata
+df['source_file'] = source_file
+df['week_label'] = week_label
+
+# collapse to one row per quote_id (handles line-item reports)
+df = dedupe_to_quote_level(df)
+
+with sqlite3.connect(DB_PATH) as conn:
+    cols = ['quote_id','account','amount','stage','stage_bucket','owner','vendor','product_family','state','quote_date','week_label','source_file']
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+
+    # delete any existing quote_ids (so re-uploads replace, not fail)
+    ids = df['quote_id'].dropna().astype(str).unique().tolist()
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        conn.execute(f"DELETE FROM quotes WHERE quote_id IN ({placeholders})", ids)
+
+    df[cols].to_sql('quotes', conn, if_exists='append', index=False)
 
 def load_quotes():
     with sqlite3.connect(DB_PATH) as conn:
