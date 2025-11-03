@@ -5,13 +5,42 @@ from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from streamlit_plotly_events import plotly_events
+# Clickable charts (guarded so the app still works if the lib isn't present)
+try:
+    from streamlit_plotly_events import plotly_events
+except Exception as e:
+    import streamlit as st
+    st.warning(f"Clickable charts disabled ({e}). You can still use the dashboard.")
+    def plotly_events(fig, **kwargs):
+        # Fallback: just render the chart; return no click events
+        st.plotly_chart(fig, use_container_width=True)
+        return []
 
 # ──────────────────────────────────────────────────────────────────────────────
 # App config
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Jenne Cloud Quotes Dashboard — Team V1", layout="wide")
 st.title("☁️ Jenne Cloud Quotes Dashboard — Team V1")
+
+with st.expander("⚙️ Debug / Environment (open if something breaks)"):
+    # Package versions
+    import sys
+    st.write({
+        "python": sys.version,
+        "streamlit": st.__version__,
+        "pandas": pd.__version__,
+    })
+    # DB quick check
+    try:
+        with sqlite3.connect(DB_PATH) as _c:
+            cur = _c.cursor()
+            cur.execute("PRAGMA table_info(quotes);")
+            schema = cur.fetchall()
+            cur.execute("SELECT COUNT(*) FROM quotes;")
+            rowcount = cur.fetchone()[0]
+        st.write({"db_path": DB_PATH, "quotes_rows": rowcount, "quotes_schema": schema})
+    except Exception as e:
+        st.error(f"DB check failed: {e}")
 
 DASH_PASSWORD = os.getenv("DASH_PASSWORD") or st.secrets.get("DASH_PASSWORD", None)
 if DASH_PASSWORD:
