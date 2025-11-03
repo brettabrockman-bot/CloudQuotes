@@ -142,25 +142,36 @@ def add_region(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def combine_line_items(df: pd.DataFrame, amount_strategy: str = "sum") -> pd.DataFrame:
-    \"\"\"Combine multiple line items per Quote Number into a single quote.
-    amount_strategy: "sum" (default) or "max"
-    - SUM is safest when each line has a portion of the total
-    - MAX is safer when the full grand total repeats on each line
-    Also returns:
-      - mrc_total: SUM of MonthlyRecurringCharge per quote (if present)
-      - line_items: count of rows rolled into the quote
-      - quote_date: uses the LATEST line's date (max) so it appears in recent filters
-    \"\"\"
+    """
+    Combine multiple line items per Quote Number into a single quote.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The raw dataframe with potential multiple rows per Quote Number.
+    amount_strategy : str, optional
+        "sum" (default) or "max".
+        - SUM is safest when each line has a portion of the total.
+        - MAX is better if the full total repeats on each line.
+
+    Returns
+    -------
+    pd.DataFrame
+        A dataframe collapsed to one row per Quote Number, with:
+        - mrc_total: sum of MRC per quote (if present)
+        - line_items: count of line items combined
+        - quote_date: latest line’s date (max)
+    """
     df = df.copy()
 
-    # normalize date to datetime for grouping
+    # Normalize date to datetime for grouping
     if "quote_date" in df.columns:
         df["quote_date"] = pd.to_datetime(df["quote_date"], errors="coerce")
 
-    # amount aggregation
+    # Determine how to aggregate the amount
     amt_agg = "sum" if str(amount_strategy).lower() == "sum" else "max"
 
-    # normalize mrc to numeric
+    # Normalize MRC to numeric
     if "mrc" in df.columns:
         df["mrc"] = pd.to_numeric(df["mrc"], errors="coerce").fillna(0.0)
 
@@ -173,7 +184,7 @@ def combine_line_items(df: pd.DataFrame, amount_strategy: str = "sum") -> pd.Dat
         "vendor": "last",
         "product_family": "last",
         "state": "last",
-        "quote_date": "max",         # latest line drives quote date
+        "quote_date": "max",  # latest line drives quote date
         "week_label": "last",
         "source_file": "last",
         "region": "last",
@@ -183,10 +194,11 @@ def combine_line_items(df: pd.DataFrame, amount_strategy: str = "sum") -> pd.Dat
 
     grouped = df.groupby("quote_id", as_index=False).agg(agg_map)
 
-    # line item counts
+    # Count line items per quote
     line_counts = df.groupby("quote_id").size().rename("line_items").reset_index()
     out = grouped.merge(line_counts, on="quote_id", how="left")
 
+    # Rename and clean up
     if "mrc" in out.columns:
         out = out.rename(columns={"mrc": "mrc_total"})
 
