@@ -1,4 +1,3 @@
-
 import os
 import re
 import sqlite3
@@ -42,6 +41,7 @@ LOCKED_MAP = {
     "quote_id": "Quote Number",
     "vendor": "Vendor Name",
     "amount": "Grand Total after Discount",
+    "mrc": "MonthlyRecurringCharge",
     "owner": "Inside Rep.",
     "stage": "Milestone",
     "quote_date": "Entered Date",
@@ -54,6 +54,7 @@ PREFERRED = {
     "quote_id": "quote number",
     "vendor": "vendor name",
     "amount": "grand total after discount",
+    "mrc": "monthlyrecurringcharge",
     "owner": "inside rep.",
     "stage": "milestone",
     "quote_date": "entered date",
@@ -72,8 +73,8 @@ REQUIRED_CANONICAL = ["quote_id", "amount"]
 def normalize(s):
     s = str(s or "")
     s = s.strip().lower()
-    s = re.sub(r"[\s_]+", " ", s)
-    s = re.sub(r"[^a-z0-9 #./()\-]+", "", s)
+    s = re.sub(r"[\\s_]+", " ", s)
+    s = re.sub(r"[^a-z0-9 #./()\\-]+", "", s)
     return s.strip()
 
 def flex_map_columns(df):
@@ -114,9 +115,20 @@ def init_db():
                 state TEXT,
                 quote_date TEXT,
                 week_label TEXT,
-                source_file TEXT
+                source_file TEXT,
+                mrc_total REAL,
+                line_items INTEGER
             );
         """)
+        # migrations (no-op if already applied)
+        try:
+            conn.execute("ALTER TABLE quotes ADD COLUMN mrc_total REAL;")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE quotes ADD COLUMN line_items INTEGER;")
+        except Exception:
+            pass
         conn.commit()
 
 def add_region(df: pd.DataFrame) -> pd.DataFrame:
@@ -129,24 +141,29 @@ def add_region(df: pd.DataFrame) -> pd.DataFrame:
     df["region"] = tmp.map(REGION_BY_STATE).fillna("Unassigned")
     return df
 
-def dedupe_to_quote_level(df: pd.DataFrame, amount_strategy: str = "sum") -> pd.DataFrame:
-    """Collapse line-item rows to one row per quote_id.
+def combine_line_items(df: pd.DataFrame, amount_strategy: str = "sum") -> pd.DataFrame:
+    \"\"\"Combine multiple line items per Quote Number into a single quote.
     amount_strategy: "sum" (default) or "max"
-    - SUM is safest when each line has a portion of the total.
-    - MAX is safer when the full grand total is repeated on each line.
-    """
+    - SUM is safest when each line has a portion of the total
+    - MAX is safer when the full grand total repeats on each line
+    Also returns:
+      - mrc_total: SUM of MonthlyRecurringCharge per quote (if present)
+      - line_items: count of rows rolled into the quote
+      - quote_date: uses the LATEST line's date (max) so it appears in recent filters
+    \"\"\"
     df = df.copy()
-    sort_cols = []
-    if "last_changed" in df.columns:
-        df["last_changed"] = pd.to_datetime(df["last_changed"], errors="coerce")
-        sort_cols.append("last_changed")
+
+    # normalize date to datetime for grouping
     if "quote_date" in df.columns:
         df["quote_date"] = pd.to_datetime(df["quote_date"], errors="coerce")
-        sort_cols.append("quote_date")
-    if sort_cols:
-        df = df.sort_values(sort_cols)
 
-    amt_agg = "sum" if amount_strategy.lower() == "sum" else "max"
+    # amount aggregation
+    amt_agg = "sum" if str(amount_strategy).lower() == "sum" else "max"
+
+    # normalize mrc to numeric
+    if "mrc" in df.columns:
+        df["mrc"] = pd.to_numeric(df["mrc"], errors="coerce").fillna(0.0)
+
     agg_map = {
         "account": "last",
         "amount": amt_agg,
@@ -156,13 +173,27 @@ def dedupe_to_quote_level(df: pd.DataFrame, amount_strategy: str = "sum") -> pd.
         "vendor": "last",
         "product_family": "last",
         "state": "last",
-        "quote_date": "last",
+        "quote_date": "max",         # latest line drives quote date
         "week_label": "last",
         "source_file": "last",
         "region": "last",
     }
-    agg_map = {k: v for k, v in agg_map.items() if k in df.columns}
-    return df.groupby("quote_id", as_index=False).agg(agg_map)
+    if "mrc" in df.columns:
+        agg_map["mrc"] = "sum"
+
+    grouped = df.groupby("quote_id", as_index=False).agg(agg_map)
+
+    # line item counts
+    line_counts = df.groupby("quote_id").size().rename("line_items").reset_index()
+    out = grouped.merge(line_counts, on="quote_id", how="left")
+
+    if "mrc" in out.columns:
+        out = out.rename(columns={"mrc": "mrc_total"})
+
+    if "quote_date" in out.columns:
+        out["quote_date"] = pd.to_datetime(out["quote_date"], errors="coerce").dt.date
+
+    return out
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Upload & ingest
@@ -191,9 +222,13 @@ def upsert_quotes_from_df(raw_df, source_file, week_label, use_locked_map, repla
         if req not in df.columns:
             raise ValueError(f"Missing required column: {req}")
 
+    # types
     df["quote_id"] = df["quote_id"].astype(str).str.strip()
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
+    if "mrc" in df.columns:
+        df["mrc"] = pd.to_numeric(df["mrc"], errors="coerce").fillna(0.0)
 
+    # dates
     if "quote_date" in df.columns:
         qd = pd.to_datetime(df["quote_date"], errors="coerce")
         if treat_bad_dates_as_today:
@@ -215,20 +250,24 @@ def upsert_quotes_from_df(raw_df, source_file, week_label, use_locked_map, repla
     df["source_file"] = source_file
     df["week_label"] = week_label
 
-    # Diagnostics before dedupe
+    # Diagnostics before combine
     ingest_raw_rows = len(df)
     ingest_raw_quotes = df["quote_id"].nunique(dropna=True)
 
-    # Collapse to quote-level rows
-    df = dedupe_to_quote_level(df, amount_strategy=amount_strategy)
+    # Combine line items into one row per quote
+    df = combine_line_items(df, amount_strategy=amount_strategy)
 
-    # Diagnostics after dedupe
+    # Diagnostics after
     ingest_rows = len(df)
     ingest_quotes = df["quote_id"].nunique(dropna=True)
     st.sidebar.info(f"Ingest preview — rows: {ingest_rows:,} (raw {ingest_raw_rows:,}) | unique quotes: {ingest_quotes:,} (raw {ingest_raw_quotes:,}) | amount agg: {amount_strategy.upper()}")
 
     with sqlite3.connect(DB_PATH) as conn:
-        cols = ["quote_id","account","amount","stage","stage_bucket","owner","vendor","product_family","state","quote_date","week_label","source_file"]
+        cols = [
+            "quote_id","account","amount","mrc_total",
+            "stage","stage_bucket","owner","vendor","product_family",
+            "state","quote_date","week_label","source_file","line_items"
+        ]
         for c in cols:
             if c not in df.columns:
                 df[c] = None
@@ -342,12 +381,14 @@ with st.expander("Data quality & diagnostics"):
 # ──────────────────────────────────────────────────────────────────────────────
 total_quotes = len(df)
 total_amount = df["amount"].sum()
+total_mrc = df["mrc_total"].sum() if "mrc_total" in df.columns else 0.0
 unique_accounts = df["account"].nunique(dropna=True)
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Total Quotes", f"{total_quotes:,}")
 c2.metric("Total Amount", f"${total_amount:,.0f}")
-c3.metric("Unique Accounts", f"{unique_accounts:,}")
-c4.metric("Region", region_choice)
+c3.metric("Total MRC", f"${total_mrc:,.0f}")
+c4.metric("Unique Accounts", f"{unique_accounts:,}")
+c5.metric("Region", region_choice)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Charts + Drilldowns
