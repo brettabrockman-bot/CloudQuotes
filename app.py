@@ -129,8 +129,12 @@ def add_region(df: pd.DataFrame) -> pd.DataFrame:
     df["region"] = tmp.map(REGION_BY_STATE).fillna("Unassigned")
     return df
 
-def dedupe_to_quote_level(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse line-item rows to one row per quote_id."""
+def dedupe_to_quote_level(df: pd.DataFrame, amount_strategy: str = "sum") -> pd.DataFrame:
+    """Collapse line-item rows to one row per quote_id.
+    amount_strategy: "sum" (default) or "max"
+    - SUM is safest when each line has a portion of the total.
+    - MAX is safer when the full grand total is repeated on each line.
+    """
     df = df.copy()
     sort_cols = []
     if "last_changed" in df.columns:
@@ -142,9 +146,10 @@ def dedupe_to_quote_level(df: pd.DataFrame) -> pd.DataFrame:
     if sort_cols:
         df = df.sort_values(sort_cols)
 
+    amt_agg = "sum" if amount_strategy.lower() == "sum" else "max"
     agg_map = {
         "account": "last",
-        "amount": "max",
+        "amount": amt_agg,
         "stage": "last",
         "stage_bucket": "last",
         "owner": "last",
@@ -157,8 +162,7 @@ def dedupe_to_quote_level(df: pd.DataFrame) -> pd.DataFrame:
         "region": "last",
     }
     agg_map = {k: v for k, v in agg_map.items() if k in df.columns}
-    deduped = df.groupby("quote_id", as_index=False).agg(agg_map)
-    return deduped
+    return df.groupby("quote_id", as_index=False).agg(agg_map)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Upload & ingest
@@ -172,7 +176,7 @@ def read_with_header_row(uploaded_file, header_row_1based: int):
         df = pd.read_excel(uploaded_file, header=hdr)
     return df
 
-def upsert_quotes_from_df(raw_df, source_file, week_label, use_locked_map, replace_existing):
+def upsert_quotes_from_df(raw_df, source_file, week_label, use_locked_map, replace_existing, amount_strategy, treat_bad_dates_as_today):
     df = raw_df.copy()
 
     if use_locked_map:
@@ -191,7 +195,10 @@ def upsert_quotes_from_df(raw_df, source_file, week_label, use_locked_map, repla
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
 
     if "quote_date" in df.columns:
-        df["quote_date"] = pd.to_datetime(df["quote_date"], errors="coerce").dt.date
+        qd = pd.to_datetime(df["quote_date"], errors="coerce")
+        if treat_bad_dates_as_today:
+            qd = qd.fillna(pd.Timestamp(date.today()))
+        df["quote_date"] = qd.dt.date
     else:
         df["quote_date"] = date.today()
 
@@ -207,7 +214,18 @@ def upsert_quotes_from_df(raw_df, source_file, week_label, use_locked_map, repla
     df = add_region(df)
     df["source_file"] = source_file
     df["week_label"] = week_label
-    df = dedupe_to_quote_level(df)
+
+    # Diagnostics before dedupe
+    ingest_raw_rows = len(df)
+    ingest_raw_quotes = df["quote_id"].nunique(dropna=True)
+
+    # Collapse to quote-level rows
+    df = dedupe_to_quote_level(df, amount_strategy=amount_strategy)
+
+    # Diagnostics after dedupe
+    ingest_rows = len(df)
+    ingest_quotes = df["quote_id"].nunique(dropna=True)
+    st.sidebar.info(f"Ingest preview — rows: {ingest_rows:,} (raw {ingest_raw_rows:,}) | unique quotes: {ingest_quotes:,} (raw {ingest_raw_quotes:,}) | amount agg: {amount_strategy.upper()}")
 
     with sqlite3.connect(DB_PATH) as conn:
         cols = ["quote_id","account","amount","stage","stage_bucket","owner","vendor","product_family","state","quote_date","week_label","source_file"]
@@ -238,12 +256,29 @@ uploaded = st.sidebar.file_uploader("Upload Epicor export (.xls/.xlsx/.csv)", ty
 header_row_1based = st.sidebar.number_input("Header row (1-based)", min_value=1, max_value=20, value=3, step=1)
 use_locked_map = st.sidebar.checkbox("Strict Epicor mapping (exact header names)", value=True)
 replace_existing = st.sidebar.checkbox("Replace existing Quote Numbers on ingest", value=True)
-
 week_label = st.sidebar.text_input("Week label (e.g., 2025-W45)", value=datetime.now().strftime("%Y-W%W"))
+
+# Troubleshooting controls
+amount_strategy = st.sidebar.selectbox(
+    "Quote total aggregation",
+    ["sum", "max"], index=0,
+    help="How to roll up multiple line items per Quote Number."
+)
+treat_bad_dates_as_today = st.sidebar.checkbox(
+    "Treat bad/missing dates as today (avoid drops on filter)", value=True
+)
+ignore_date_filter = st.sidebar.checkbox(
+    "Ignore date filter (show all rows regardless of date)", value=False
+)
+
 if st.sidebar.button("Ingest File") and uploaded is not None:
     try:
         raw = read_with_header_row(uploaded, header_row_1based)
-        upsert_quotes_from_df(raw, uploaded.name, week_label, use_locked_map, replace_existing)
+        upsert_quotes_from_df(
+            raw, uploaded.name, week_label,
+            use_locked_map, replace_existing,
+            amount_strategy, treat_bad_dates_as_today
+        )
         st.sidebar.success(f"Ingested: {uploaded.name}")
     except Exception as e:
         st.sidebar.error(f"Ingest failed: {e}")
@@ -267,8 +302,17 @@ if df.empty:
     st.info("No data yet. Upload a weekly export to get started.")
     st.stop()
 
-df["quote_date"] = pd.to_datetime(df["quote_date"]).dt.date
-df = df[(df["quote_date"] >= date_min) & (df["quote_date"] <= date_max)]
+df["quote_date"] = pd.to_datetime(df["quote_date"], errors="coerce").dt.date
+before_filter_rows = len(df)
+
+if not ignore_date_filter:
+    df = df[(df["quote_date"] >= date_min) & (df["quote_date"] <= date_max)]
+
+after_filter_rows = len(df)
+if ignore_date_filter:
+    st.caption(f"Date filter ignored — showing all rows ({after_filter_rows:,}).")
+else:
+    st.caption(f"Date filter applied: kept {after_filter_rows:,} of {before_filter_rows:,} rows from {date_min} to {date_max}.")
 
 if region_choice != "All Regions":
     df = df[df["region"] == region_choice]
@@ -280,6 +324,18 @@ if account_filter:
     df = df[df["account"].astype(str).str.contains(account_filter, case=False, na=False)]
 if stage_choice != "All":
     df = df[df["stage_bucket"] == stage_choice]
+
+# Data quality & diagnostics
+with st.expander("Data quality & diagnostics"):
+    st.write({
+        "rows_loaded_total": len(df),
+        "unique_quotes": df["quote_id"].nunique(dropna=True),
+        "min_quote_date": str(pd.to_datetime(df["quote_date"]).min()),
+        "max_quote_date": str(pd.to_datetime(df["quote_date"]).max()),
+        "amount_strategy": amount_strategy,
+        "ignore_date_filter": ignore_date_filter,
+        "treat_bad_dates_as_today": treat_bad_dates_as_today,
+    })
 
 # ──────────────────────────────────────────────────────────────────────────────
 # KPIs
