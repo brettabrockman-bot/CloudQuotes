@@ -137,12 +137,11 @@ def add_region(df: pd.DataFrame) -> pd.DataFrame:
 
 def read_uploaded(uploaded_file):
     name = uploaded_file.name.lower()
-    # Header row is Row 2 => header=1 (0-index) for Excel
     if name.endswith(".csv"):
-        # For CSV, assume first row is header; if this export produces a dummy first row, we can skiprows=1
-        df = pd.read_csv(uploaded_file)
+        # CSVs don’t keep Excel row structure; if your CSV still has 2 “title” rows above headers:
+        df = pd.read_csv(uploaded_file, skiprows=2)  # skip first 2 rows, header will be the next row
     else:
-        df = pd.read_excel(uploaded_file, header=1)  # <-- row 2 headers
+        df = pd.read_excel(uploaded_file, header=2)  # <-- row 3 is the header line
     return df
 
 def upsert_quotes_from_df(raw_df: pd.DataFrame, source_file: str, week_label: str):
