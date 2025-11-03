@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local data & secrets (never commit)
+data/*.db
+.env
+.streamlit/secrets.toml
